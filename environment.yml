@@ -1,0 +1,18 @@
+# environment.yml
+name: faiss_env
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+dependencies:
+  - python=3.10
+  - faiss-gpu
+  - cudatoolkit=11.8
+  - numpy<2.0
+  - pip
+  - pip:
+    - fastapi
+    - uvicorn
+    - asyncpg
+    - python-dotenv
+    - httpx
