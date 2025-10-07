@@ -1,0 +1,8 @@
+# requirements.txt
+fastapi
+uvicorn
+asyncpg
+python-dotenv
+numpy<2.0
+faiss-gpu
+httpx
