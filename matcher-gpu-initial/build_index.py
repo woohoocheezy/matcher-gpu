@@ -59,10 +59,9 @@ async def main():
     train_start_time = time.time()
     train_vectors = np.array([np.frombuffer(r['face_descriptor'], dtype=np.uint8) for r in train_records]).astype('float32')
     
-    faiss.normalize_L2(train_vectors)
-    
+    # 👈 [수정 완료] m 값을 64에서 32로 줄여 GPU 아키텍처 한계에 맞춤
     nlist = min(16384, int(np.sqrt(len(train_records)) * 8))
-    m = 32
+    m = 32  # 벡터를 32개 조각으로 나눠서 압축
     bits = 8
     
     quantizer = faiss.IndexFlatL2(VECTOR_DIMENSION)
@@ -80,33 +79,25 @@ async def main():
     gpu_index = faiss.index_cpu_to_gpu(res, 0, cpu_index)
     
     all_db_ids = []
+    batch_vectors = []
     total_vectors_added = 0
-    batch_vectors_buffer = [] # 데이터를 임시 저장할 버퍼
     
     main_query = f'SELECT id, face_descriptor FROM "{ORG_GROUP_ID}"."events" WHERE face_descriptor IS NOT NULL AND LENGTH(face_descriptor) = {VECTOR_DIMENSION} AND created_at >= $1 AND created_at < $2'
     
     async with conn.transaction():
         async for record in conn.cursor(main_query, start_date, end_date):
             all_db_ids.append(record['id'])
-            batch_vectors_buffer.append(np.frombuffer(record['face_descriptor'], dtype=np.uint8))
+            batch_vectors.append(np.frombuffer(record['face_descriptor'], dtype=np.uint8))
             
-            # 버퍼가 BATCH_SIZE에 도달하면 인덱스에 추가
-            if len(batch_vectors_buffer) == BATCH_SIZE:
-                vectors_to_add = np.array(batch_vectors_buffer).astype('float32')
-                faiss.normalize_L2(vectors_to_add)
-                gpu_index.add(vectors_to_add)
-                
-                total_vectors_added += len(batch_vectors_buffer)
+            if len(batch_vectors) == BATCH_SIZE:
+                gpu_index.add(np.array(batch_vectors).astype('float32'))
+                total_vectors_added += len(batch_vectors)
                 print(f"  ... {total_vectors_added}개 벡터 추가됨 (진행 시간: {time.time() - add_start_time:.2f}초)")
-                batch_vectors_buffer = [] # 버퍼 비우기
+                batch_vectors = []
 
-    # 루프 종료 후 버퍼에 남은 데이터 추가
-    if batch_vectors_buffer:
-        vectors_to_add = np.array(batch_vectors_buffer).astype('float32')
-        faiss.normalize_L2(vectors_to_add)
-        gpu_index.add(vectors_to_add)
-        
-        total_vectors_added += len(batch_vectors_buffer)
+    if batch_vectors:
+        gpu_index.add(np.array(batch_vectors).astype('float32'))
+        total_vectors_added += len(batch_vectors)
         print(f"  ... {total_vectors_added}개 벡터 추가됨 (진행 시간: {time.time() - add_start_time:.2f}초)")
 
     await conn.close()

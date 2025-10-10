@@ -2,7 +2,6 @@
 import os
 import datetime
 import time
-import math
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -13,7 +12,6 @@ import httpx
 
 load_dotenv()
 
-# --- 설정 변수 ---
 DB_CONFIG = {
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
@@ -22,7 +20,7 @@ DB_CONFIG = {
     "database": os.getenv("DB_DATABASE"),
 }
 IMAGE_STORE_URL = os.getenv("IMAGE_STORE_PUBLIC_URL", "")
-FAISS_SERVER_URL = "http://faiss-server:8001/search/range"
+FAISS_SERVER_URL = "http://faiss-server:8001/search"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -34,65 +32,46 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-async def fetch_details(pool, org_group_id, ids: List[int]) -> List[dict]:
-    if not ids: return []
-    # PostgreSQL 파라미터 개수 제한(32767)보다 안전하게 작은 값으로 설정
-    if len(ids) > 30000:
-        raise ValueError("ID list size cannot exceed 30000 for a single query.")
-        
-    id_placeholders = ', '.join([f'${i+1}' for i in range(len(ids))])
-    query = f'SELECT id, camera_id, created_at, face_image_path, body_image_path FROM "{org_group_id}"."events" WHERE id IN ({id_placeholders})'
-    records = await pool.fetch(query, *ids)
-    return [dict(r) for r in records]
-
-
 class SearchRequest(BaseModel):
     org_group_id: str
     descriptor_hex: str
     start_date: datetime.datetime
     end_date: datetime.datetime
-    threshold: float = Field(0.9, ge=0.0, le=1.0)
 
-def similarity_to_l2_distance_squared(similarity: float) -> float:
-    """ 코사인 유사도를 L2 거리의 제곱으로 변환합니다. """
-    if not (0.0 <= similarity <= 1.0):
-        raise ValueError("Similarity must be between 0.0 and 1.0")
-    # L2_distance^2 = 2 - 2 * cosine_similarity
-    return 2 - 2 * similarity
+async def fetch_details(pool, org_group_id, ids: List[int]) -> List[dict]:
+    if not ids: return []
+    id_placeholders = ', '.join([f'${i+1}' for i in range(len(ids))])
+    query = f'SELECT id, camera_id, created_at, face_image_path, body_image_path FROM "{org_group_id}"."events" WHERE id IN ({id_placeholders})'
+    records = await pool.fetch(query, *ids)
+    return [dict(r) for r in records]
 
 @app.post("/search/face")
 async def search_face(request: Request, data: SearchRequest):
     overall_start_time = time.time()
     try:
-        l2_distance_sq_threshold = similarity_to_l2_distance_squared(data.threshold)
-
+        # 1. Faiss 서버에 ID 목록 요청
+        faiss_req_start = time.time()
         resp = await request.app.state.http_client.post(
-            FAISS_SERVER_URL, json={"descriptor_hex": data.descriptor_hex, "threshold": l2_distance_sq_threshold}, timeout=10.0
+            FAISS_SERVER_URL, json={"descriptor_hex": data.descriptor_hex, "top_k": 100}, timeout=10.0
         )
         resp.raise_for_status()
         faiss_result = resp.json()
         matched_ids = faiss_result.get("db_ids", [])
-        print(f"Faiss range search took {faiss_result.get('search_time_ms', 0):.2f} ms, found {len(matched_ids)} IDs.")
+        print(f"Faiss search took {faiss_result.get('search_time_ms', 0):.2f} ms")
 
         if not matched_ids:
             return {"code": "success", "rows": []}
 
-        # [수정] ID 목록을 30,000개 단위로 나누어 DB에 조회
-        details = []
-        batch_size = 30000
-        for i in range(0, len(matched_ids), batch_size):
-            batch_ids = matched_ids[i:i + batch_size]
-            batch_details = await fetch_details(request.app.state.db_pool, data.org_group_id, batch_ids)
-            details.extend(batch_details)
-            print(f"Fetched details for {len(batch_ids)} IDs (total fetched: {len(details)})")
+        # 2. 받아온 ID로 DB에서 상세 정보 조회
+        details = await fetch_details(request.app.state.db_pool, data.org_group_id, matched_ids)
 
-        # 시간 필터링 및 최종 결과 조합
+        # 3. 시간 필터링 및 최종 결과 조합
         final_results = []
         start_naive = data.start_date.replace(tzinfo=None)
         end_naive = data.end_date.replace(tzinfo=None)
         
         details_map = {d['id']: d for d in details}
-        
+        # Faiss 결과 순서를 유지하며 필터링
         for an_id in matched_ids:
             detail = details_map.get(an_id)
             if detail and start_naive <= detail['created_at'] < end_naive:
@@ -102,12 +81,9 @@ async def search_face(request: Request, data: SearchRequest):
                     detail["body_image_path"] = f"{IMAGE_STORE_URL}{detail['body_image_path']}"
                 final_results.append(detail)
         
-        print(f"Total request processed in {(time.time() - overall_start_time) * 1000:.2f} ms. Returning {len(final_results)} rows.")
+        print(f"Total request processed in {(time.time() - overall_start_time) * 1000:.2f} ms.")
         return {"code": "success", "rows": final_results}
-
     except httpx.RequestError as e:
         raise HTTPException(status_code=503, detail=f"Faiss server error: {e}")
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

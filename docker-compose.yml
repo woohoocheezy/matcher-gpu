@@ -4,23 +4,6 @@ volumes:
   faiss_data_volume:
 
 services:
-  build-indexer:
-    build: .
-    container_name: build-indexer
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    volumes:
-      - faiss_data_volume:/app/faiss_data
-    env_file:
-      - .env
-    # 👈 [수정 완료] Conda 환경의 python 실행 파일 절대 경로를 직접 지정
-    command: ["/opt/conda/envs/faiss_env/bin/python", "build_index.py"]
-
   faiss-server:
     build: .
     container_name: faiss-server
@@ -34,15 +17,11 @@ services:
               count: 1
               capabilities: [gpu]
     volumes:
-      - ./faiss_server:/app
+      - ./faiss_server:/app/faiss_server
       - faiss_data_volume:/app/faiss_data:ro
     env_file:
       - .env
-    depends_on:
-      build-indexer:
-        condition: service_completed_successfully
-    # 👈 [수정 완료] Conda 환경의 uvicorn 실행 파일 절대 경로를 직접 지정
-    command: ["/opt/conda/envs/faiss_env/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+    command: ["/opt/conda/envs/faiss_env/bin/uvicorn", "faiss_server.main:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
 
   api-server:
     build: .
@@ -50,10 +29,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./api_server:/app
+      - ./api_server:/app/api_server
     env_file:
       - .env
     depends_on:
       - faiss-server
-    # 👈 [수정 완료] Conda 환경의 uvicorn 실행 파일 절대 경로를 직접 지정
-    command: ["/opt/conda/envs/faiss_env/bin/uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["/opt/conda/envs/faiss_env/bin/uvicorn", "api_server.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -1,0 +1,21 @@
+# docker-compose.build.yml
+
+volumes:
+  faiss_data_volume:
+
+services:
+  build-indexer:
+    build: .
+    container_name: build-indexer
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - faiss_data_volume:/app/faiss_data
+    env_file:
+      - .env
+    command: ["/opt/conda/envs/faiss_env/bin/python", "build_index.py"]
